@@ -4,6 +4,7 @@ import re
 import pytest
 
 import idom
+from idom import html
 from idom.core.dispatcher import render_json_patch
 from idom.core.hooks import LifeCycleHook
 from idom.testing import HookCatcher, assert_idom_logged
@@ -895,3 +896,54 @@ async def test_use_memo_automatically_infers_closure_values():
             await layout.render()
             await did_memo.wait()
             did_memo.clear()
+
+
+async def test_use_context_default_value():
+    Context = idom.create_context("something")
+    value = idom.Ref()
+
+    @idom.component
+    def ComponentProvidesContext():
+        return Context(ComponentUsesContext())
+
+    @idom.component
+    def ComponentUsesContext():
+        value.current = idom.use_context(Context)
+        return html.div()
+
+    with idom.Layout(ComponentProvidesContext()) as layout:
+        await layout.render()
+        assert value.current == "something"
+
+
+async def test_use_context_only_renders_for_value_change():
+    Context = idom.create_context(None)
+
+    provider_hook = HookCatcher()
+    render_count = idom.Ref(0)
+    set_state = idom.Ref()
+
+    @idom.component
+    @provider_hook.capture
+    def ComponentProvidesContext():
+        state, set_state.current = idom.use_state(0)
+        return Context(ComponentUsesContext(), value=state)
+
+    @idom.component
+    def ComponentUsesContext():
+        render_count.current += 1
+        return html.div()
+
+    with idom.Layout(ComponentProvidesContext()) as layout:
+        await layout.render()
+        assert render_count.current == 1
+
+        set_state.current(1)
+
+        await layout.render()
+        assert render_count.current == 2
+
+        provider_hook.latest.schedule_render()
+
+        await layout.render()
+        assert render_count.current == 2

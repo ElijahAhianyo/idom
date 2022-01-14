@@ -24,7 +24,10 @@ from typing import (
 
 from typing_extensions import Protocol
 
+from idom.core.proto import Key
 from idom.utils import Ref
+
+from .vdom import vdom
 
 
 if not TYPE_CHECKING:
@@ -187,17 +190,71 @@ def use_effect(
 
             clean = last_clean_callback.current = sync_function()
             if clean is not None:
-                hook.add_effect(WILL_UNMOUNT_EFFECT, clean)
+                hook.add_effect(COMPONENT_WILL_UNMOUNT_EFFECT, clean)
 
             return None
 
-        return memoize(lambda: hook.add_effect(DID_RENDER_EFFECT, effect))
+        return memoize(lambda: hook.add_effect(LAYOUT_DID_RENDER_EFFECT, effect))
 
     if function is not None:
         add_effect(function)
         return None
     else:
         return add_effect
+
+
+def create_context(
+    default_value: _StateType, name: str = None
+) -> type[_Context[_StateType]]:
+    return type(name or "Context", (_Context,), {"_default_value": default_value})
+
+
+def use_context(context: type[_Context[_StateType]]) -> _StateType:
+    try:
+        context_obj = _current_contexts[get_thread_id()][context]
+    except KeyError:
+        return context._default_value
+    else:
+        return context_obj.value
+
+
+_UNDEFINED = object()
+_current_contexts: Dict[int, Dict[type[_Context], _Context]] = {}
+
+
+class _Context(Generic[_StateType]):
+
+    _default_value: _StateType
+
+    def __init__(
+        self,
+        *children: Any,
+        value: _StateType = _UNDEFINED,
+        key: Key | None = None,
+    ) -> None:
+        self.children = children
+        self.value = self._default_value if value is _UNDEFINED else value
+        self.key = key
+
+    def render(self):
+        contexts = _current_contexts.setdefault(get_thread_id(), {})
+
+        ctx_type = self.__class__
+        prior_ctx = contexts.get(ctx_type)
+        contexts[ctx_type] = self
+
+        def reset_ctx():
+            if prior_ctx is None:
+                del contexts[ctx_type]
+            else:
+                contexts[ctx_type] = prior_ctx
+
+        current_hook().add_effect(COMPONENT_DID_RENDER_EFFECT, reset_ctx)
+
+        return vdom("div", *self.children)
+
+    def should_render(self, new: _Context) -> bool:
+        return self.value is not new.value
 
 
 _ActionType = TypeVar("_ActionType")
@@ -428,10 +485,13 @@ def current_hook() -> "LifeCycleHook":
 EffectType = NewType("EffectType", str)
 """Used in :meth:`LifeCycleHook.add_effect` to indicate what effect should be saved"""
 
-DID_RENDER_EFFECT = EffectType("DID_RENDER")
-"""An effect that will be triggered after each render"""
+COMPONENT_DID_RENDER_EFFECT = EffectType("COMPONENT_DID_RENDER")
+"""An effect that will be triggered each time a component renders"""
 
-WILL_UNMOUNT_EFFECT = EffectType("WILL_UNMOUNT")
+LAYOUT_DID_RENDER_EFFECT = EffectType("LAYOUT_DID_RENDER")
+"""An effect that will be triggered each time a layout renders"""
+
+COMPONENT_WILL_UNMOUNT_EFFECT = EffectType("COMPONENT_WILL_UNMOUNT")
 """An effect that will be triggered just before the component is unmounted"""
 
 
@@ -461,7 +521,7 @@ class LifeCycleHook:
 
             # --- start render cycle ---
 
-            hook.component_will_render()
+            hook.affect_component_will_render()
 
             hook.set_current()
 
@@ -481,7 +541,7 @@ class LifeCycleHook:
             # This should only be called after any child components yielded by
             # component_instance.render() have also been rendered because effects
             # must run after the full set of changes have been resolved.
-            hook.component_did_render()
+            hook.affect_component_did_render()
 
             # Typically an event occurs and a new render is scheduled, thus begining
             # the render cycle anew.
@@ -490,7 +550,7 @@ class LifeCycleHook:
 
             # --- end render cycle ---
 
-            hook.component_will_unmount()
+            hook.affect_component_will_unmount()
             del hook
 
             # --- end render cycle ---
@@ -518,8 +578,9 @@ class LifeCycleHook:
         self._current_state_index = 0
         self._state: Tuple[Any, ...] = ()
         self._event_effects: Dict[EffectType, List[Callable[[], None]]] = {
-            DID_RENDER_EFFECT: [],
-            WILL_UNMOUNT_EFFECT: [],
+            COMPONENT_DID_RENDER_EFFECT: [],
+            LAYOUT_DID_RENDER_EFFECT: [],
+            COMPONENT_WILL_UNMOUNT_EFFECT: [],
         }
 
     def schedule_render(self) -> None:
@@ -544,30 +605,41 @@ class LifeCycleHook:
         """Trigger a function on the occurance of the given effect type"""
         self._event_effects[effect_type].append(function)
 
-    def component_will_render(self) -> None:
+    def affect_component_will_render(self) -> None:
         """The component is about to render"""
         self._is_rendering = True
-        self._event_effects[WILL_UNMOUNT_EFFECT].clear()
+        self._event_effects[COMPONENT_WILL_UNMOUNT_EFFECT].clear()
 
-    def component_did_render(self) -> None:
+    def affect_component_did_render(self) -> None:
         """The component completed a render"""
-        did_render_effects = self._event_effects[DID_RENDER_EFFECT]
-        for effect in did_render_effects:
+        component_did_render_effects = self._event_effects[COMPONENT_DID_RENDER_EFFECT]
+        for effect in component_did_render_effects:
             try:
                 effect()
             except Exception:
                 logger.exception(f"Post-render effect {effect} failed")
-        did_render_effects.clear()
+        component_did_render_effects.clear()
 
         self._is_rendering = False
-        if self._schedule_render_later:
-            self._schedule_render()
         self._rendered_atleast_once = True
         self._current_state_index = 0
 
-    def component_will_unmount(self) -> None:
+    def affect_layout_did_render(self) -> None:
+        """The component completed a render"""
+        layout_did_render_effects = self._event_effects[LAYOUT_DID_RENDER_EFFECT]
+        for effect in layout_did_render_effects:
+            try:
+                effect()
+            except Exception:
+                logger.exception(f"Post-render effect {effect} failed")
+        layout_did_render_effects.clear()
+
+        if self._schedule_render_later:
+            self._schedule_render()
+
+    def affect_component_will_unmount(self) -> None:
         """The component is about to be removed from the layout"""
-        will_unmount_effects = self._event_effects[WILL_UNMOUNT_EFFECT]
+        will_unmount_effects = self._event_effects[COMPONENT_WILL_UNMOUNT_EFFECT]
         for effect in will_unmount_effects:
             try:
                 effect()

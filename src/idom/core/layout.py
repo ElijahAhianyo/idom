@@ -124,7 +124,7 @@ class Layout:
             except Exception:
                 logger.exception(f"Failed to execute event handler {handler}")
         else:
-            logger.info(
+            logger.debug(
                 f"Ignored event - handler {event.target!r} does not exist or its component unmounted"
             )
 
@@ -135,7 +135,7 @@ class Layout:
             try:
                 model_state = self._model_states_by_life_cycle_state_id[model_state_id]
             except KeyError:
-                logger.info(
+                logger.debug(
                     "Did not render component with model state ID "
                     "{model_state_id!r} - component already unmounted"
                 )
@@ -167,7 +167,7 @@ class Layout:
         # hook effects must run after the update is complete
         for model_state in _iter_model_state_children(new_state):
             if hasattr(model_state, "life_cycle_state"):
-                model_state.life_cycle_state.hook.component_did_render()
+                model_state.life_cycle_state.hook.affect_layout_did_render()
 
         old_model: Optional[VdomJson]
         try:
@@ -190,8 +190,13 @@ class Layout:
         life_cycle_state = new_state.life_cycle_state
         self._model_states_by_life_cycle_state_id[life_cycle_state.id] = new_state
 
+        if old_state is not None:
+            if not old_state.life_cycle_state.component.should_render(component):
+                new_state.model.current = old_state.model.current
+                return None
+
         life_cycle_hook = life_cycle_state.hook
-        life_cycle_hook.component_will_render()
+        life_cycle_hook.affect_component_will_render()
 
         try:
             life_cycle_hook.set_current()
@@ -210,6 +215,8 @@ class Layout:
                     else ""
                 ),
             }
+        finally:
+            life_cycle_hook.affect_component_did_render()
         try:
             parent = new_state.parent
         except AttributeError:
@@ -410,7 +417,7 @@ class Layout:
             if hasattr(model_state, "life_cycle_state"):
                 life_cycle_state = model_state.life_cycle_state
                 del self._model_states_by_life_cycle_state_id[life_cycle_state.id]
-                life_cycle_state.hook.component_will_unmount()
+                life_cycle_state.hook.affect_component_will_unmount()
 
             to_unmount.extend(model_state.children_by_key.values())
 

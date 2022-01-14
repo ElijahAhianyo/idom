@@ -35,6 +35,9 @@ class ComponentType(Protocol):
     def render(self) -> VdomDict:
         """Render the component's :class:`VdomDict`."""
 
+    def should_render(self, new: ComponentType) -> bool:
+        """Whether the new component instance should be rendered."""
+
 
 _Self = TypeVar("_Self")
 _Render = TypeVar("_Render", covariant=True)

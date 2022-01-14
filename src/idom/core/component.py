@@ -57,6 +57,9 @@ class Component:
             model = {"tagName": "div", "children": [model]}
         return model
 
+    def should_render(self, new: Component) -> bool:
+        return True
+
     def __repr__(self) -> str:
         sig = inspect.signature(self._func)
         try:

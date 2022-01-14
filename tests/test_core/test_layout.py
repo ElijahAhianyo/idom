@@ -831,3 +831,7 @@ async def test_layout_does_not_copy_element_children_by_key():
         set_items.current([])
 
         await layout.render()
+
+
+async def test_component_should_update():
+    assert False
