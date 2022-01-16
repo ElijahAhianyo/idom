@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from logging import getLogger
-from threading import get_ident as get_thread_id
+from threading import current_thread
 from types import FunctionType
 from typing import (
     TYPE_CHECKING,
@@ -21,6 +21,7 @@ from typing import (
     cast,
     overload,
 )
+from weakref import WeakKeyDictionary
 
 from typing_extensions import Protocol
 
@@ -49,6 +50,25 @@ logger = getLogger(__name__)
 _StateType = TypeVar("_StateType")
 
 
+class _ThreadLocal(Generic[_StateType]):
+    """Utility for managing per-thread state information"""
+
+    def __init__(self, default: Callable[[], _StateType]):
+        self._default = default
+        self._state: WeakKeyDictionary[int, _StateType] = WeakKeyDictionary()
+
+    def get(self) -> _StateType:
+        thread = current_thread()
+        if thread not in self._state:
+            state = self._state[thread] = self._default()
+        else:
+            state = self._state[thread]
+        return state
+
+    def set(self, state: _StateType) -> None:
+        self._state[current_thread()] = state
+
+
 @overload
 def use_state(
     initial_value: Callable[[], _StateType],
@@ -75,7 +95,9 @@ def use_state(
     _StateType,
     Callable[[_StateType | Callable[[_StateType], _StateType]], None],
 ]:
-    """See the full :ref:`Use State` docs for details
+    """Declare state inside a component.
+
+    See the full :ref:`Use State` docs for details
 
     Parameters:
         initial_value:
@@ -206,25 +228,41 @@ def use_effect(
 def create_context(
     default_value: _StateType, name: str = None
 ) -> type[_Context[_StateType]]:
+    """Return a new context type for use in :func:`use_context`"""
     return type(name or "Context", (_Context,), {"_default_value": default_value})
 
 
 def use_context(context: type[_Context[_StateType]]) -> _StateType:
-    try:
-        context_obj = _current_contexts[get_thread_id()][context]
-    except KeyError:
+    """Get the current value for the given context type.
+
+    See the full :ref:`Use Context` docs for more information.
+    """
+    ctx = context._current.get()
+
+    if ctx is None:
         return context._default_value
-    else:
-        return context_obj.value
+
+    state, set_state = use_state(ctx.value)
+
+    @use_effect
+    def subscribe_to_context_changes():
+        ctx.subscribers.add(set_state)
+        return lambda: ctx.subscribers.remove(set_state)
+
+    return state
 
 
 _UNDEFINED = object()
-_current_contexts: Dict[int, Dict[type[_Context], _Context]] = {}
 
 
 class _Context(Generic[_StateType]):
 
     _default_value: _StateType
+    _current: _ThreadLocal[_Context | None]
+
+    def __init_subclass__(cls) -> None:
+        # every context type tracks which of its instances are currently in use
+        cls._current = _ThreadLocal(lambda: None)
 
     def __init__(
         self,
@@ -235,26 +273,31 @@ class _Context(Generic[_StateType]):
         self.children = children
         self.value = self._default_value if value is _UNDEFINED else value
         self.key = key
+        self.subscribers: set[Callable[[_StateType], None]] = set()
 
     def render(self):
-        contexts = _current_contexts.setdefault(get_thread_id(), {})
+        current_ctx = self.__class__._current
 
-        ctx_type = self.__class__
-        prior_ctx = contexts.get(ctx_type)
-        contexts[ctx_type] = self
+        prior_ctx = current_ctx.get()
+        current_ctx.set(self)
 
         def reset_ctx():
-            if prior_ctx is None:
-                del contexts[ctx_type]
-            else:
-                contexts[ctx_type] = prior_ctx
+            current_ctx.set(prior_ctx)
 
         current_hook().add_effect(COMPONENT_DID_RENDER_EFFECT, reset_ctx)
 
         return vdom("div", *self.children)
 
     def should_render(self, new: _Context) -> bool:
-        return self.value is not new.value
+        should = self.value is not new.value
+        if should:
+            new.subscribers.update(self.subscribers)
+            for set_state in self.subscribers:
+                set_state(new.value)
+        return should
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({id(self)})"
 
 
 _ActionType = TypeVar("_ActionType")
@@ -470,16 +513,16 @@ def _try_to_infer_closure_values(
         return cast("Sequence[Any] | None", values)
 
 
-_current_life_cycle_hook: Dict[int, "LifeCycleHook"] = {}
+_current_hook: _ThreadLocal[LifeCycleHook | None] = _ThreadLocal(lambda: None)
 
 
 def current_hook() -> "LifeCycleHook":
     """Get the current :class:`LifeCycleHook`"""
-    try:
-        return _current_life_cycle_hook[get_thread_id()]
-    except KeyError as error:
+    hook = _current_hook.get()
+    if hook is None:
         msg = "No life cycle hook is active. Are you rendering in a layout?"
-        raise RuntimeError(msg) from error
+        raise RuntimeError(msg)
+    return hook
 
 
 EffectType = NewType("EffectType", str)
@@ -538,10 +581,12 @@ class LifeCycleHook:
             finally:
                 hook.unset_current()
 
-            # This should only be called after any child components yielded by
-            # component_instance.render() have also been rendered because effects
-            # must run after the full set of changes have been resolved.
             hook.affect_component_did_render()
+
+            # This should only be called after any child components yielded by
+            # component_instance.render() have also been rendered because effects of
+            # this type must run after the full set of changes have been resolved.
+            hook.affect_layout_did_render()
 
             # Typically an event occurs and a new render is scheduled, thus begining
             # the render cycle anew.
@@ -653,13 +698,13 @@ class LifeCycleHook:
         This method is called by a layout before entering the render method
         of this hook's associated component.
         """
-        _current_life_cycle_hook[get_thread_id()] = self
+        _current_hook.set(self)
 
     def unset_current(self) -> None:
         """Unset this hook as the active hook in this thread"""
         # this assertion should never fail - primarilly useful for debug
-        assert _current_life_cycle_hook[get_thread_id()] is self
-        del _current_life_cycle_hook[get_thread_id()]
+        assert _current_hook.get() is self
+        _current_hook.set(None)
 
     def _schedule_render(self) -> None:
         try:

@@ -233,6 +233,9 @@ class Layout:
             parent.model.current["children"][index : index + 1] = [
                 new_state.model.current
             ]
+        finally:
+            # avoid double render
+            self._rendering_queue.remove_if_pending(life_cycle_state.id)
 
     def _render_model(
         self,
@@ -669,8 +672,15 @@ class _ThreadSafeQueue(Generic[_Type]):
             self._loop.call_soon_threadsafe(self._queue.put_nowait, value)
         return None
 
+    def remove_if_pending(self, value: _Type) -> None:
+        if value in self._pending:
+            self._pending.remove(value)
+
     async def get(self) -> _Type:
-        value = await self._queue.get()
+        while True:
+            value = await self._queue.get()
+            if value in self._pending:
+                break
         self._pending.remove(value)
         return value
 

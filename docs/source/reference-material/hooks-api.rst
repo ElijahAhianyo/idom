@@ -197,6 +197,24 @@ produce different effect behaviors:
   ``x`` or ``y`` have changed.
 
 
+Use Context
+-----------
+
+.. code-block::
+
+    value = use_context(MyContext)
+
+Accepts a context object (the value returned from
+:func:`idom.core.hooks.create_context`) and returns the current context value for that
+context. The current context value is determined by the ``value`` argument passed to the
+nearest ``MyContext`` in the tree.
+
+When the nearest <MyContext.Provider> above the component updates, this Hook will
+trigger a rerender with the latest context value passed to that MyContext provider. Even
+if an ancestor uses React.memo or shouldComponentUpdate, a rerender will still happen
+starting at the component itself using useContext.
+
+
 Supplementary Hooks
 ===================
 

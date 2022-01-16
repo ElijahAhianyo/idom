@@ -6,7 +6,7 @@ import pytest
 import idom
 from idom import html
 from idom.core.dispatcher import render_json_patch
-from idom.core.hooks import LifeCycleHook
+from idom.core.hooks import LifeCycleHook, use_context, use_memo
 from idom.testing import HookCatcher, assert_idom_logged
 from tests.general_utils import assert_same_items
 
@@ -927,10 +927,10 @@ async def test_use_context_only_renders_for_value_change():
     @provider_hook.capture
     def ComponentProvidesContext():
         state, set_state.current = idom.use_state(0)
-        return Context(ComponentUsesContext(), value=state)
+        return Context(ComponentInContext(), value=state)
 
     @idom.component
-    def ComponentUsesContext():
+    def ComponentInContext():
         render_count.current += 1
         return html.div()
 
@@ -947,3 +947,51 @@ async def test_use_context_only_renders_for_value_change():
 
         await layout.render()
         assert render_count.current == 2
+
+
+async def test_use_context_updates_components_even_if_memoized():
+    Context = idom.create_context(None)
+
+    value = idom.Ref(None)
+    render_count = idom.Ref(0)
+    set_state = idom.Ref()
+
+    @idom.component
+    def ComponentProvidesContext():
+        state, set_state.current = idom.use_state(0)
+        return Context(ComponentInContext(), value=state)
+
+    @idom.component
+    def ComponentInContext():
+        return use_memo(MemoizedComponentUsesContext)
+
+    @idom.component
+    def MemoizedComponentUsesContext():
+        value.current = use_context(Context)
+        render_count.current += 1
+        return html.div()
+
+    with idom.Layout(ComponentProvidesContext()) as layout:
+        await layout.render()
+        assert render_count.current == 1
+        assert value.current == 0
+
+        set_state.current(1)
+
+        await layout.render()
+        assert render_count.current == 2
+        assert value.current == 1
+
+        set_state.current(2)
+
+        await layout.render()
+        assert render_count.current == 3
+        assert value.current == 2
+
+
+async def test_nested_contexts_do_not_conflict():
+    assert False
+
+
+async def test_neighboring_contexts_do_not_conflict():
+    assert False
