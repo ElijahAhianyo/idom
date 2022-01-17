@@ -990,8 +990,110 @@ async def test_use_context_updates_components_even_if_memoized():
 
 
 async def test_nested_contexts_do_not_conflict():
-    assert False
+    Context = idom.create_context(None)
+
+    outer_value = idom.Ref(None)
+    inner_value = idom.Ref(None)
+    outer_render_count = idom.Ref(0)
+    inner_render_count = idom.Ref(0)
+    set_outer_value = idom.Ref()
+    set_root_value = idom.Ref()
+
+    @idom.component
+    def Root():
+        outer_value, set_root_value.current = idom.use_state(-1)
+        return Context(Outer(), value=outer_value)
+
+    @idom.component
+    def Outer():
+        inner_value, set_outer_value.current = idom.use_state(1)
+        outer_value.current = use_context(Context)
+        outer_render_count.current += 1
+        return Context(Inner(), value=inner_value)
+
+    @idom.component
+    def Inner():
+        inner_value.current = use_context(Context)
+        inner_render_count.current += 1
+        return html.div()
+
+    with idom.Layout(Root()) as layout:
+        await layout.render()
+        assert outer_render_count.current == 1
+        assert inner_render_count.current == 1
+        assert outer_value.current == -1
+        assert inner_value.current == 1
+
+        set_root_value.current(-2)
+
+        await layout.render()
+        assert outer_render_count.current == 2
+        assert inner_render_count.current == 1
+        assert outer_value.current == -2
+        assert inner_value.current == 1
+
+        set_outer_value.current(2)
+
+        await layout.render()
+        assert outer_render_count.current == 3
+        assert inner_render_count.current == 2
+        assert outer_value.current == -2
+        assert inner_value.current == 2
 
 
 async def test_neighboring_contexts_do_not_conflict():
-    assert False
+    LeftContext = idom.create_context(None, name="Left")
+    RightContext = idom.create_context(None, name="Right")
+
+    set_left = idom.Ref()
+    set_right = idom.Ref()
+    left_used_value = idom.Ref()
+    right_used_value = idom.Ref()
+    left_render_count = idom.Ref(0)
+    right_render_count = idom.Ref(0)
+
+    @idom.component
+    def Root():
+        left_value, set_left.current = idom.use_state(1)
+        right_value, set_right.current = idom.use_state(1)
+        return idom.html.div(
+            LeftContext(Left(), value=left_value),
+            RightContext(Right(), value=right_value),
+        )
+
+    @idom.component
+    def Left():
+        left_render_count.current += 1
+        left_used_value.current = idom.use_context(LeftContext)
+        return idom.html.div()
+
+    @idom.component
+    def Right():
+        right_render_count.current += 1
+        right_used_value.current = idom.use_context(RightContext)
+        return idom.html.div()
+
+    with idom.Layout(Root()) as layout:
+        await layout.render()
+        assert left_render_count.current == 1
+        assert right_render_count.current == 1
+        assert left_used_value.current == 1
+        assert right_used_value.current == 1
+
+        for i in range(2, 5):
+            set_left.current(i)
+
+            await layout.render()
+            assert left_render_count.current == i
+            assert right_render_count.current == 1
+            assert left_used_value.current == i
+            assert right_used_value.current == 1
+
+        for j in range(2, 5):
+            set_right.current(j)
+
+            await layout.render()
+            assert left_render_count.current == i
+            assert right_render_count.current == j
+            assert left_used_value.current == i
+            assert right_used_value.current == j

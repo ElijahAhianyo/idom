@@ -232,24 +232,42 @@ def create_context(
     return type(name or "Context", (_Context,), {"_default_value": default_value})
 
 
-def use_context(context: type[_Context[_StateType]]) -> _StateType:
+def use_context(context_type: type[_Context[_StateType]]) -> _StateType:
     """Get the current value for the given context type.
 
     See the full :ref:`Use Context` docs for more information.
     """
-    ctx = context._current.get()
+    # We have to use a Ref here since, if initially context_type._current is None, and
+    # then on a subsequent render it is present, we need to be able to dynamically adopt
+    # that newly present current context. When we update it though, we don't need to
+    # schedule a new render since we're already rending right now. Thus we can't do this
+    # with use_state() since we'd incur an extra render when calling set_state.
+    context_ref = use_ref(None)
 
-    if ctx is None:
-        return context._default_value
+    if context_ref.current is None:
+        provided_context = context_type._current.get()
+        if provided_context is None:
+            return context_type._default_value
+        context_ref.current = provided_context
 
-    state, set_state = use_state(ctx.value)
+    # We need the hook now so that we can schedule an update when
+    hook = current_hook()
+
+    context = context_ref.current
 
     @use_effect
-    def subscribe_to_context_changes():
-        ctx.subscribers.add(set_state)
-        return lambda: ctx.subscribers.remove(set_state)
+    def subscribe_to_context_change():
+        def set_context(new: _Context) -> None:
+            # We don't need to check if `new is not context_ref.current` because we only
+            # trigger this callback when the value of a context, and thus the context
+            # itself changes. Therefore we can always schedule a render.
+            context_ref.current = new
+            hook.schedule_render()
 
-    return state
+        context.subscribers.add(set_context)
+        return lambda: context.subscribers.remove(set_context)
+
+    return context.value
 
 
 _UNDEFINED = object()
@@ -273,7 +291,7 @@ class _Context(Generic[_StateType]):
         self.children = children
         self.value = self._default_value if value is _UNDEFINED else value
         self.key = key
-        self.subscribers: set[Callable[[_StateType], None]] = set()
+        self.subscribers: set[Callable[[_Context], None]] = set()
 
     def render(self):
         current_ctx = self.__class__._current
@@ -289,12 +307,12 @@ class _Context(Generic[_StateType]):
         return vdom("div", *self.children)
 
     def should_render(self, new: _Context) -> bool:
-        should = self.value is not new.value
-        if should:
+        if self.value is not new.value:
             new.subscribers.update(self.subscribers)
-            for set_state in self.subscribers:
-                set_state(new.value)
-        return should
+            for set_context in self.subscribers:
+                set_context(new)
+            return True
+        return False
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({id(self)})"

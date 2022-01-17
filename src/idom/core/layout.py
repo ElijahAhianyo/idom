@@ -190,37 +190,39 @@ class Layout:
         life_cycle_state = new_state.life_cycle_state
         self._model_states_by_life_cycle_state_id[life_cycle_state.id] = new_state
 
-        if old_state is not None:
-            if not old_state.life_cycle_state.component.should_render(component):
-                new_state.model.current = old_state.model.current
-                return None
+        if (
+            old_state is not None
+            and not old_state.life_cycle_state.component.should_render(component)
+        ):
+            new_state.model.current = old_state.model.current
+        else:
+            life_cycle_hook = life_cycle_state.hook
+            life_cycle_hook.affect_component_will_render()
 
-        life_cycle_hook = life_cycle_state.hook
-        life_cycle_hook.affect_component_will_render()
-
-        try:
-            life_cycle_hook.set_current()
             try:
-                raw_model = component.render()
+                life_cycle_hook.set_current()
+                try:
+                    raw_model = component.render()
+                finally:
+                    life_cycle_hook.unset_current()
+                self._render_model(old_state, new_state, raw_model)
+            except Exception as error:
+                logger.exception(f"Failed to render {component}")
+                new_state.model.current = {
+                    "tagName": "",
+                    "error": (
+                        f"{type(error).__name__}: {error}"
+                        if IDOM_DEBUG_MODE.current
+                        else ""
+                    ),
+                }
             finally:
-                life_cycle_hook.unset_current()
-            self._render_model(old_state, new_state, raw_model)
-        except Exception as error:
-            logger.exception(f"Failed to render {component}")
-            new_state.model.current = {
-                "tagName": "",
-                "error": (
-                    f"{type(error).__name__}: {error}"
-                    if IDOM_DEBUG_MODE.current
-                    else ""
-                ),
-            }
-        finally:
-            life_cycle_hook.affect_component_did_render()
+                life_cycle_hook.affect_component_did_render()
+
         try:
             parent = new_state.parent
         except AttributeError:
-            pass
+            pass  # only happens for root component
         else:
             key, index = new_state.key, new_state.index
             if old_state is not None:
